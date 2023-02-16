@@ -1641,6 +1641,354 @@ class Flight(
 
         return res
 
+    def magic_filter(
+        self,
+        paracol: str,
+        stage1width: int,
+        th1: float,
+        th2: float,
+        window: int,
+        timediff: int,
+        paradiff: float,
+        groupsize: int,
+        stage5width: int,
+        timecol: str = "timestamp",
+        applystage1: bool = True,
+        applystage2: bool = True,
+        applystage3: bool = True,
+        applyinterpolation: bool = True,
+        applysmoothing: bool = True,
+        return_intermediate: bool = False,
+    ) -> Flight:
+        """
+        Filters a parameter of a flight using a combination of different filters. Each stage
+        can be applied or not, and the parameters of each stage can be adjusted. A
+        description of the stages is provided below.
+        1: filter stage 1
+        -----------------
+        Applies a rolling median filter to the parameter. The width of the filter can be
+        adjusted with the stage1width parameter.
+        2: filter stage 2
+        -----------------
+        Filter based on the derivative of the parameter. Datpoints where the derivative is
+        above a threshold are marked as spikes. The threshold can be adjusted with the th1
+        and th2 parameters while the window parameter defines over how many timestamps the
+        derivative is calculated.
+        3: filter stage 3
+        -----------------
+        Clustering-like filter. Clusters are separated the time difference or a parameter
+        difference are above a threshold. The threshold can be adjusted with the timediff
+        and paradiff parameters. Clusters of a certain size are kept and all that are
+        smaller are removed. The size of the clusters can be adjusted with the groupsize
+        parameter.
+        4: interpolation
+        ----------------
+        Applies a pandas "time" interpolation to the parameter.
+        5: smoothing
+        ------------
+        Smoothes the parameter using a rolling mean filter. The width of the filter can be
+        adjusted with the stage 6 width parameter.
+        Parameters
+        ----------
+        flight : traffic.core.flight.Flight
+            flight to be filtered
+        paracol : str
+            name of the parameter to be filtered
+        stage1width : int
+            width of the rolling median filter in stage 1
+        th1 : float
+            threshold for the first derivative above which a datapoint is marked as a spike in stage 2
+        th2 : float
+            threshold for the second derivative above which a datapoint is marked as a spike in stage 2
+        window : int
+            window (amount of timestamps) over which the derivative is calculated in stage 2
+        timediff : int
+            threshold for the time difference between two datapoints above which a new cluster is
+            started in stage 3
+        paradiff : float
+            threshold for the parameter difference between two datapoints above which a new cluster is
+            started in stage 3
+        groupsize : int
+            minimum size of a cluster to be kept in stage 3
+        stage5width : int
+            width of the rolling mean filter in stage 5
+        timecol : str, optional
+            name of the column containing the timestamps, by default 'timestamp'
+        applystage1 : bool, optional
+            determines whether stage 1 is applied, by default True
+        applystage2 : bool, optional
+            determines whether stage 2 is applied, by default True
+        applystage3 : bool, optional
+            determines whether stage 3 is applied, by default True
+        applyinterpolation : bool, optional
+            determines whether stage 4 is applied, by default True
+        applysmoothing : bool, optional
+            determines whether stage 5 is applied, by default True
+        return_intermediate : bool, optional
+            determines whether the intermediate steps are returned, by default False
+        Returns
+        -------
+        traffic.core.flight.Flight
+            flight with the defined parameter filtered
+        """
+
+        # Extract data from flight object
+        df = self.data
+
+        # Drop columns containing duplicate values in timestamp column and index
+        df = df.drop_duplicates([timecol], keep="last")
+        df = df[~df.index.duplicated(keep="last")]
+
+        # Filter stage 1: moving median
+        if applystage1 == True:
+            df[paracol] = df[paracol].rolling(stage1width, center=True).median()
+
+        # Filter stage 2: derivative filter
+        if applystage2 == True:
+            df["timediff"] = df[timecol].diff().astype("timedelta64[s]")
+            df["diff_1"] = abs(df[paracol].diff())
+            if paracol == "track":
+                df.loc[
+                    (df["diff_1"] < 370) & (df["diff_1"] > 350), "diff_1"
+                ] = 0
+            df["diff_2"] = abs(df.diff_1.diff())
+
+            df["deriv_1"] = df.diff_1 / df.timediff
+            df["deriv_2"] = df.diff_2 / df.timediff
+            df.loc[
+                (df["deriv_1"] >= th1) | (df["deriv_2"] >= th2), "spike"
+            ] = True
+            df["spike"].fillna(False, inplace=True)
+            df.loc[df["spike"] == True, "spike_time"] = df.timestamp
+
+            if df["spike_time"].isnull().all() == False:
+                df["spike_time_prev"] = df["spike_time"].ffill()
+                df["spike_time_prev"] = (
+                    df["timestamp"] - df["spike_time_prev"]
+                ).astype("timedelta64[s]")
+                df["spike_time_next"] = df["spike_time"].bfill()
+                df["spike_time_next"] = (
+                    df["spike_time_next"] - df["timestamp"]
+                ).astype("timedelta64[s]")
+                df.loc[
+                    (
+                        (df["spike_time_prev"] <= window)
+                        & (df["spike_time_next"] <= window)
+                    ),
+                    "in_window",
+                ] = True
+                df.loc[(df["in_window"] == True), paracol] = np.NaN
+
+        # Filter stage 3: clustering filter
+        if applystage3 == True:
+            if paracol == "onground":
+                df["statechange"] = df[paracol].diff().astype(bool)
+                df["grouper"] = df["statechange"].eq(True).cumsum()
+                groups = df["grouper"].value_counts()
+                keepers = groups[groups > groupsize].index.tolist()
+                df[paracol] = df[paracol].where(
+                    df["grouper"].isin(keepers), float("NaN")
+                )
+            else:
+                df["timediff"] = df[timecol].diff().astype("timedelta64[s]")
+                temp_index = df.index
+                temp_values = df[paracol].dropna()
+                df["valuediff"] = abs(temp_values.diff().reindex(temp_index))
+                df["bigdiff"] = np.where(
+                    (
+                        (df["timediff"] > timediff)
+                        | (df["valuediff"] > paradiff)
+                    ),
+                    True,
+                    False,
+                )
+                df["group"] = df["bigdiff"].eq(True).cumsum()
+                df_temp = df[df[paracol].notna()]
+                groups = df_temp["group"].value_counts()
+                keepers = groups[groups > groupsize].index.tolist()
+                df[paracol] = df[paracol].where(
+                    df["group"].isin(keepers), float("NaN")
+                )
+
+        # Interpolation
+        if applyinterpolation == True:
+            if paracol == "onground":
+                df[paracol] = (
+                    df[paracol]
+                    .astype(float)
+                    .interpolate("nearest")
+                    .astype(bool)
+                )
+            else:
+                df.set_index(df["timestamp"], inplace=True)
+                df[paracol] = df[paracol].interpolate("time")
+                df = df.drop("timestamp", axis=1)
+                df.reset_index(drop=False, inplace=True)
+
+        # Smoothing
+        if applysmoothing == True:
+            df[paracol] = df[paracol].rolling(stage5width, center=True).mean()
+
+        if return_intermediate == True:
+            return self.__class__(df)
+
+        else:
+            df = df.drop(
+                [
+                    "timediff",
+                    "diff_1",
+                    "diff_2",
+                    "deriv_1",
+                    "deriv_2",
+                    "spike",
+                    "spike_time",
+                    "spike_time_prev",
+                    "spike_time_next",
+                    "in_window",
+                    "statechange",
+                    "grouper",
+                    "valuediff",
+                    "bigdiff",
+                    "group",
+                ],
+                axis=1,
+                errors="ignore",
+            )
+
+        return self.__class__(df)
+
+    def filter_krum(self):
+        return (
+            self.magic_filter(
+                paracol="geoaltitude",  # geoaltitude
+                # applystage1=True,§
+                stage1width=11,
+                # applystage2=True,
+                th1=200,
+                th2=150,
+                window=10,
+                # applystage3=False,
+                timediff=60,
+                paradiff=500,
+                groupsize=20,
+                # applyinterpolation=False,
+                # applysmoothing=False,
+                stage5width=5,
+            )
+            .magic_filter(
+                paracol="altitude",  # baroaltitude
+                # applystage1=False,
+                stage1width=11,
+                # applystage2=False,
+                th1=200,
+                th2=150,
+                window=10,
+                # applystage3=False,
+                timediff=60,
+                paradiff=500,
+                groupsize=15,
+                # applyinterpolation=False,
+                # applysmoothing=False,
+                stage5width=5,
+            )
+            .magic_filter(
+                paracol="vertical_rate",  # vertical_rate
+                # applystage1=False,
+                stage1width=9,
+                applystage2=False,
+                th1=0,
+                th2=0,
+                window=0,
+                applystage3=True,
+                timediff=60,
+                paradiff=600,
+                groupsize=15,
+                applyinterpolation=False,
+                applysmoothing=False,
+                stage5width=3,
+            )
+            .magic_filter(
+                paracol="groundspeed",  # groundspeed
+                # applystage1=False,
+                stage1width=9,
+                # applystage2=False,
+                th1=12,  # 15
+                th2=10,  # 15
+                window=3,
+                applystage3=False,
+                timediff=60,
+                paradiff=50,  # 30
+                groupsize=15,
+                # applyinterpolation=False,
+                # applysmoothing=False,
+                stage5width=7,
+            )
+            .magic_filter(
+                paracol="onground",
+                applystage1=False,
+                stage1width=9,
+                applystage2=False,
+                th1=15,
+                th2=15,
+                window=2,
+                # applystage3=False,
+                timediff=60,
+                paradiff=30,
+                groupsize=15,
+                # applyinterpolation=False,
+                applysmoothing=False,
+                stage5width=7,
+            )
+            .magic_filter(
+                paracol="track",
+                # applystage1=False,
+                stage1width=5,
+                # applystage2=False,
+                th1=12,
+                th2=10,
+                window=2,  # 2
+                # applystage3=False,
+                timediff=60,
+                paradiff=20,
+                groupsize=20,
+                # applyinterpolation=False,
+                # applysmoothing=False,
+                stage5width=3,
+            )
+            .magic_filter(
+                paracol="latitude",
+                # applystage1=False,
+                stage1width=7,
+                applystage2=False,
+                th1=0.02,
+                th2=0.02,
+                window=2,  # 2
+                # applystage3=False,
+                timediff=60,
+                paradiff=0.05,
+                groupsize=10,
+                # applyinterpolation=False,
+                applysmoothing=False,
+                stage5width=7,
+            )
+            .magic_filter(
+                paracol="longitude",
+                # applystage1=False,
+                stage1width=7,
+                applystage2=False,
+                th1=0.02,
+                th2=0.02,
+                window=2,  # 2
+                # applystage3=False,
+                timediff=60,
+                paradiff=0.05,
+                groupsize=10,
+                # applyinterpolation=False,
+                applysmoothing=False,
+                stage5width=7,
+            )
+        )
+
     def filter(
         self,
         strategy: Optional[
@@ -3063,3 +3411,215 @@ class Flight(
             )
             .drop(columns=["Timestamp", "Position"])
         )
+
+    def vr_alt_score(
+        self,
+        calc_window: int = 6,
+        smooth_window: int = 5,
+        return_intermediate: bool = False,
+    ) -> Flight:
+        """
+        Calculates the vr_alt_score for a given flight and adds it to the underlying dataframe.
+        The vr_alt_score is a metric that measures the coherence of the flight's vertical rate,
+        barometric altitude and geometric altitude. The score is calculated by determining the average
+        standard deviation of the flight's vertical rate, as determined by barometric and geometric
+        altitudes, as well as the flight's actual vertical rate. The lower the score, the better the
+        coherence and the better the quality of the concerned parameters
+        as a general rule of thumb:
+            0-100 = good quality
+            100-1000 = acceptable quality
+            >1000 = bad quality
+        Parameters:
+        flight: Flight
+            The flight object for which the score will be calculated and appended.
+        calc_window: int
+            Defines the width of the window used to calculate the rates. Default is 6.
+        smooth_window: int
+            Width of the window used for the moving average filter. Default is 5.
+        return_intermediate: bool
+            If set to True, additionally returns the intermediate columns used to calculate the score.
+            Default is False.
+        Returns:
+        Flight:
+            The flight object with the calculated vr_alt_score added as a column in the underlying
+            dataframe.
+        """
+
+        # Extract the underlying dataframe
+        flight = self.data
+
+        # Determine first derivative of timestamp baroaltitude, and geoaltitude for the given window.
+        flight["timediff"] = (
+            (flight["timestamp"].shift(-calc_window) - flight["timestamp"])
+            .dt.total_seconds()
+            .shift(+int(calc_window / 2))
+        )
+        flight["barodiff"] = (
+            flight["altitude"].shift(-calc_window) - flight["altitude"]
+        ).shift(+int(calc_window / 2))
+        flight["geodiff"] = (
+            flight["geoaltitude"].shift(-calc_window) - flight["geoaltitude"]
+        ).shift(+int(calc_window / 2))
+
+        # Based on the first derivatives, calculate the vertical rates based on altitudes and
+        # timestamps. Also apply a moving average filter to the calculated vertical rates.
+        flight["vr_baroaltitude"] = (
+            (((flight["barodiff"]) / flight["timediff"]) * 60)
+            .rolling(smooth_window, center=True)
+            .mean()
+        )
+        flight["vr_geoaltitude"] = (
+            (((flight["geodiff"]) / flight["timediff"]) * 60)
+            .rolling(smooth_window, center=True)
+            .mean()
+        )
+
+        # Apply same smoothing to the actual vertical rate as to the calculated ones
+        flight["vr_sm"] = flight.vertical_rate.rolling(
+            smooth_window, center=True
+        ).mean()
+
+        # Calculate the variance of the vertical rates
+        flight["vr_std"] = np.std(
+            flight[["vr_baroaltitude", "vr_geoaltitude", "vr_sm"]], axis=1
+        )
+
+        # Add the mean of the variance to the flight object
+        flight["vr_alt_score"] = np.mean(flight.vr_std)
+
+        # Drop the intermediate columns if return_intermediate is set to False
+        if return_intermediate == False:
+            flight = flight.drop(
+                [
+                    "timediff",
+                    "barodiff",
+                    "geodiff",
+                    "vr_baroaltitude",
+                    "vr_geoaltitude",
+                    "vr_sm",
+                    "vr_std",
+                ],
+                axis=1,
+            )
+
+        # Return as a Flight object
+        return self.__class__(flight)
+
+    def gs_pos_score(
+        self,
+        calc_window: int = 6,
+        smooth_window: int = 5,
+        return_intermediate: bool = False,
+    ) -> Flight:
+        """
+        Calculates the pos_gps_score for a given flight and adds it to the underlying dataframe.
+        The pos_gps_score is a metric that measures the coherence of the flight's position and
+        groundspeed. The score is calculated by determining the average standard deviation of the
+        flight's groundspeed, as determined by position, as well as the flight's actual groundspeed.
+        The lower the score, the better the coherence and the better the quality of the concerned
+        parameters
+        as a general rule of thumb:
+            0-100       = good quality
+            100-1000    = acceptable quality
+            >1000       = bad quality
+        Parameters:
+        flight: Flight
+            The flight object for which the score will be calculated and appended.
+        calc_window: int
+            Defines the width of the window used to calculate the groundspeed. Default is 6.
+        smooth_window: int
+            Width of the window used for the moving average filter. Default is 5.
+        return_intermediate: bool
+            If set to True, additionally returns the intermediate columns used to calculate the score.
+            Default is False.
+        Returns:
+        Flight:
+            The flight object with the calculated vr_alt_score added as a column in the underlying
+            dataframe.
+        """
+
+        # Extract the underlying dataframe
+        flight = self.data
+
+        # Determine timedelta between consecutive datapoints
+        flight["timedelta"] = (
+            flight["timestamp"].shift(-1) - flight["timestamp"]
+        ).dt.total_seconds()
+
+        # Determine great-circle distance between consecutive datapoints
+        flight["dist"] = (
+            1000
+            * 6367
+            * 2
+            * np.arcsin(
+                np.sqrt(
+                    np.sin(
+                        (
+                            np.radians(flight["latitude"].shift(-1))
+                            - np.radians(flight["latitude"])
+                        )
+                        / 2
+                    )
+                    ** 2
+                    + np.cos(np.radians(flight["latitude"]))
+                    * np.cos(np.radians(flight["latitude"].shift(-1)))
+                    * np.sin(
+                        (
+                            np.radians(flight["longitude"].shift(-1))
+                            - np.radians(flight["longitude"])
+                        )
+                        / 2
+                    )
+                    ** 2
+                )
+            )
+        )
+
+        # Sum distances and time deltas over the given window.
+        flight["dist_sum"] = flight["dist"].rolling(calc_window).sum()
+        flight["timedelta_sum"] = flight["timedelta"].rolling(calc_window).sum()
+
+        # Based on summed values, the groundspeed is calculated. The groundspeed is then shifted by half
+        # the window to the left
+        flight["gsp"] = (flight["dist_sum"] / flight["timedelta_sum"]).shift(
+            +int(calc_window / 2)
+        )
+
+        # Conversion from m/s to knots
+        flight["gsp_kts"] = flight["gsp"] * 1.94384
+
+        # Apply a moving average filter to the calculated and actual groundspeed
+        flight["gsp_kts_sm"] = flight.gsp_kts.rolling(
+            smooth_window, center=True
+        ).mean()
+        flight["groundspeed_sm"] = flight.groundspeed.rolling(
+            smooth_window, center=True
+        ).mean()
+
+        # Get the standard deviation between the calculated groundspeed and the actual groundspeed
+        flight["gs_pos_sd"] = np.std(
+            flight[["gsp_kts_sm", "groundspeed_sm"]], axis=1
+        )
+
+        # Add the mean of the standard deviation to the flight object
+        flight["gs_pos_score"] = np.mean(flight["gs_pos_sd"])
+
+        # Drop the intermediate columns if return_intermediate is set to False
+        if return_intermediate == False:
+            flight = flight.drop(
+                [
+                    "timedelta",
+                    "dist",
+                    "dist_sum",
+                    "timedelta_sum",
+                    "gsp",
+                    "gsp_kts",
+                    "gsp_kts_sm",
+                    "groundspeed_sm",
+                    "gs_pos_sd",
+                ],
+                axis=1,
+            )
+
+        # Return as a Flight object
+        return self.__class__(flight)

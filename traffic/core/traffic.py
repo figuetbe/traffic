@@ -562,6 +562,18 @@ class Traffic(HBoxMixin, GeographyMixin):
         ...
 
     @lazy_evaluation()
+    def filter_krum(self):  # type: ignore
+        ...
+
+    @lazy_evaluation()
+    def gs_pos_score(self):  # type: ignore
+        ...
+
+    @lazy_evaluation()
+    def vr_alt_score(self):  # type: ignore
+        ...
+
+    @lazy_evaluation()
     def filter_position(self, cascades: int = 2):  # type: ignore
         ...
 
