@@ -26,6 +26,8 @@ from typing import (
     overload,
 )
 
+import plotly.express as px
+import plotly.graph_objects as go
 from ipyleaflet import Map as LeafletMap
 from ipywidgets import HTML
 from rich.console import Console, ConsoleOptions, RenderResult
@@ -1209,6 +1211,61 @@ class Traffic(HBoxMixin, GeographyMixin):
         for i, flight in enumerate(self):
             if nb_flights is None or i < nb_flights:
                 flight.plot(ax, **kwargs)
+
+    def plotly_mapbox(self, line=True, **kwargs: Any) -> go.Figure:
+        """Plot the flight trajectory on a Mapbox map.
+
+        :param line: Whether to draw a line connecting the points or a scatter
+            plot. Default is True.
+        :param **kwargs: Additional keyword arguments to pass to the
+            `px.scatter_mapbox` function.
+        :return: A Plotly figure representing the flight trajectory on
+            a mapbox layer.
+
+        Example usage:
+
+        .. code:: python
+
+            traffic.plotly_mapbox(
+                **{"color": "flight_id", "hover_data": "altitude"}
+            )
+        """
+        if "mapbox_style" in kwargs:
+            mapbox_style = kwargs["mapbox_style"]
+        else:
+            mapbox_style = "carto-positron"
+        if line is True and "line_group" in kwargs:
+            line_group = kwargs["line_group"]
+        else:
+            # check that flight_id is in the data
+            if "flight_id" not in self.data.columns:
+                raise ValueError(
+                    "flight_id is not in the data. "
+                    "Please use Flight.assign_id() to add it."
+                )
+            line_group = "flight_id"
+
+        if line and "animation_frame" in kwargs:
+            raise ValueError(
+                    "Cannot animate when line=True. "
+                )
+        if line:
+            return px.line_mapbox(
+                self.data,
+                lon="longitude",
+                lat="latitude",
+                line_group=line_group,
+                mapbox_style=mapbox_style,
+                **kwargs,
+            )
+        else:
+            return px.scatter_mapbox(
+                self.data,
+                lon="longitude",
+                lat="latitude",
+                mapbox_style=mapbox_style,
+                **kwargs,
+            )
 
     def agg_latlon(
         self, resolution: Union[Dict[str, float], None] = None, **kwargs: Any

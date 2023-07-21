@@ -80,6 +80,7 @@ pyopensky = { git = "https://github.com/open-aviation/pyopensky", branch = "v2.0
 # pyopensky = { path = "../pyopensky", develop = true }
 pyb2b = { version = ">=0.1", optional = true }
 # pyb2b = { path = "../pyb2b", develop = true }
+plotly = "^5.15.0"
 
 [tool.poetry.extras]
 full = ["xarray", "libarchive", "scikit-learn", "textual", "pyspark"]

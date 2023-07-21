@@ -30,6 +30,8 @@ from typing import (
     overload,
 )
 
+import plotly.express as px
+import plotly.graph_objs as go
 import rich.repr
 from ipyleaflet import Map as LeafletMap
 from ipyleaflet import Polyline as LeafletPolyline
@@ -2973,6 +2975,51 @@ class Flight(
         if self.shape is not None:
             return ax.plot(*self.shape.xy, **kwargs)  # type: ignore
         return []
+
+    def plotly_mapbox(self, line=True, **kwargs: Any) -> go.Figure:
+        """Plot the flight trajectory on a Mapbox map.
+
+        :param line: Whether to draw a line connecting the points or a scatter
+            plot. Default is True.
+        :param **kwargs: Additional keyword arguments to pass to the
+            `px.scatter_mapbox` function.
+        :return: A Plotly figure representing the flight trajectory on
+            a mapbox layer.
+
+         Example usage:
+
+        .. code:: python
+
+            flight.plotly_mapbox(
+                line=False,
+                **{"animation_frame": "timestamp", "hover_data": "altitude"}
+            )
+        """
+        if "mapbox_style" in kwargs:
+            mapbox_style = kwargs["mapbox_style"]
+        else:
+            mapbox_style = "carto-positron"
+
+        if line and "animation_frame" in kwargs:
+            raise ValueError(
+                    "Cannot animate when line=True. "
+                )
+        if line:
+            return px.line_mapbox(
+                self.data,
+                lon="longitude",
+                lat="latitude",
+                mapbox_style=mapbox_style,
+                **kwargs,
+            )
+        else:
+            return px.scatter_mapbox(
+                self.data,
+                lon="longitude",
+                lat="latitude",
+                mapbox_style=mapbox_style,
+                **kwargs,
+            )
 
     def chart(self, *features: str) -> "alt.Chart":  # coverage: ignore
         """
