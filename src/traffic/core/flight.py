@@ -1658,7 +1658,7 @@ class Flight(
         self,
         rule: str | int = "1s",
         how: None | str | dict[str, Iterable[str]] = "interpolate",
-        interpolate_kw: dict[str, Any] = {},
+        interpolate_kw: dict[str, Any] = {"method": "time"},
         projection: None | str | pyproj.Proj | "crs.Projection" = None,
     ) -> Flight:
         """Resample the trajectory at a given frequency or for a target number
@@ -1681,7 +1681,7 @@ class Flight(
               ``"interpolate"``, ``"ffill"``) and names of columns as values.
               Columns not included in any value are left as is.
 
-        :param interpolate_kw: (default: ``{}``)
+        :param interpolate_kw: (default: ``{"method": "time"}``)
 
             - A dictionary with keyword arguments that will be passed to the
               pandas :py:method:`pandas.Series.interpolate` method.
@@ -1717,14 +1717,21 @@ class Flight(
 
         if isinstance(rule, str):
             data = (
-                self.handle_last_position()
-                .unwrap()
-                .data.set_index("timestamp")
-                .resample(rule)
-                .first()
-                .reset_index()
+                self.handle_last_position().unwrap().data.set_index("timestamp")
             )
+            # Retrieve tzinfo and make timestamps naive if timezone info is present
+            if data.index.tzinfo is not None:
+                tz_info = data.index.tzinfo
+                data.index = data.index.tz_convert(None)
+            else:
+                tz_info = None
 
+            # Resample index
+            times = data.index.to_period(rule).to_timestamp(rule)
+            idx = pd.date_range(times.min(), times.max(), freq=rule)
+
+            # Reindex and rename index 'timestamp'
+            data = data.reindex(data.index.union(idx))
             data = data.infer_objects(copy=False)
 
             if how is None:
@@ -1734,6 +1741,11 @@ class Flight(
                 if how == "interpolate":
                     interpolable = data.dtypes[data.dtypes != object].index
                     other = data.dtypes[data.dtypes == object].index
+                    # Interpolate numeric columns
+                    data[interpolable] = data[interpolable].interpolate(
+                        **interpolate_kw
+                    )
+                    # Forward fill non-numeric columns
                     how = {how: set(interpolable) - {"timestamp"}}
                     how["ffill"] = set(other)
                 else:
@@ -1745,6 +1757,13 @@ class Flight(
                     kwargs = interpolate_kw if meth == "interpolate" else {}
                     value = getattr(data.iloc[:, idx], meth)(**kwargs)
                     data[data.columns[idx]] = value
+            data = data.reset_index().rename(columns={"index": "timestamp"})
+            if tz_info is not None:
+                data["timestamp"] = (
+                    data["timestamp"]
+                    .dt.tz_localize("UTC")
+                    .dt.tz_convert(tz_info)
+                )
 
         elif isinstance(rule, int):
             # ./site-packages/pandas/core/indexes/base.py:2820: FutureWarning:
