@@ -1837,7 +1837,7 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
 
     def predict(
         self,
-        method: str = "straight_line",
+        method: str = "extrapolate",
         **kwargs: Any,
     ) -> Flight | Traffic:
         """Generate trajectory predictions using various prediction methods.
@@ -1847,7 +1847,7 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
 
         Args:
             method: Prediction method to use. Available methods:
-                - "straight_line": Simple straight-line extrapolation
+                - "extrapolate": Simple straight-line extrapolation with configurable duration and sampling rate
                 - "cfm": Conditional Flow Matching (requires model_path and stats_path)
                 - Other methods may be added in the future
             **kwargs: Method-specific parameters
@@ -1857,8 +1857,8 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
             or Traffic object containing multiple predicted trajectories if n_futures>1
 
         Examples:
-            >>> # Straight line prediction for 5 minutes
-            >>> flight.predict(method="straight_line", minutes=5)
+            >>> # Straight line extrapolation for 2 minutes at 1Hz
+            >>> flight.predict(method="extrapolate", duration="2 minutes", sampling_rate=1.0)
             >>>
             >>> # CFM prediction with single future
             >>> flight.predict(
@@ -1962,7 +1962,7 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
     def predict(
         self,
         *args: Any,
-        method: Literal["default", "straight", "flightplan", "cfm"]
+        method: Literal["default", "extrapolate", "straight", "straight_line", "flightplan", "cfm"]
         | PredictBase = "default",
         **kwargs: Any,
     ) -> Flight | Traffic:
@@ -1978,7 +1978,13 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
         The following table summarizes the available methods and their
         corresponding classes:
 
-        - ``straight`` (default) uses
+        - ``extrapolate`` (default) uses
+          :class:`~traffic.algorithms.prediction.straightline.StraightLinePredict`
+
+        - ``straight`` (alias for ``extrapolate``) uses
+          :class:`~traffic.algorithms.prediction.straightline.StraightLinePredict`
+
+        - ``straight_line`` (alias for ``extrapolate``) uses
           :class:`~traffic.algorithms.prediction.straightline.StraightLinePredict`
 
         - ``flightplan`` uses
@@ -2004,7 +2010,9 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
 
         method_dict = dict(
             default=StraightLinePredict,
+            extrapolate=StraightLinePredict,
             straight=StraightLinePredict,
+            straight_line=StraightLinePredict,
             flightplan=FlightPlanPredict,
             cfm=CFMPredict,
         )
