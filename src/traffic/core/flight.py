@@ -1835,6 +1835,58 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
 
         return res
 
+    def predict(
+        self,
+        method: str = "straight_line",
+        **kwargs: Any,
+    ) -> Flight | Traffic:
+        """Generate trajectory predictions using various prediction methods.
+
+        This method extends the flight trajectory by generating predicted
+        future positions based on the historical trajectory data.
+
+        Args:
+            method: Prediction method to use. Available methods:
+                - "straight_line": Simple straight-line extrapolation
+                - "cfm": Conditional Flow Matching (requires model_path and stats_path)
+                - Other methods may be added in the future
+            **kwargs: Method-specific parameters
+
+        Returns:
+            Flight object with extended trajectory including predictions if n_futures=1,
+            or Traffic object containing multiple predicted trajectories if n_futures>1
+
+        Examples:
+            >>> # Straight line prediction for 5 minutes
+            >>> flight.predict(method="straight_line", minutes=5)
+            >>>
+            >>> # CFM prediction with single future
+            >>> flight.predict(
+            ...     method="cfm",
+            ...     model_path="path/to/model.pt",
+            ...     stats_path="path/to/stats.json",
+            ...     n_samples=1
+            ... )
+            >>>
+            >>> # CFM prediction with multiple futures
+            >>> flight.predict(
+            ...     method="cfm",
+            ...     model_path="path/to/model.pt",
+            ...     stats_path="path/to/stats.json",
+            ...     n_samples=10
+            ... )
+        """
+        if method == "straight_line":
+            from ...algorithms.prediction.straightline import StraightLinePredict
+            predictor = StraightLinePredict(**kwargs)
+            return predictor.predict(self)
+        elif method == "cfm":
+            from ...algorithms.prediction.cfm import CFMPredict
+            predictor = CFMPredict(**kwargs)
+            return predictor.predict(self)
+        else:
+            raise ValueError(f"Unknown prediction method: {method}")
+
     def filter(
         self,
         filter: Literal["default", "aggressive"]
@@ -1910,10 +1962,10 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
     def predict(
         self,
         *args: Any,
-        method: Literal["default", "straight", "flightplan"]
+        method: Literal["default", "straight", "flightplan", "cfm"]
         | PredictBase = "default",
         **kwargs: Any,
-    ) -> Flight:
+    ) -> Flight | Traffic:
         """Predicts the future trajectory based on the past data points.
 
         :param method: By default, the method propagates the trajectory in a
@@ -1932,6 +1984,9 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
         - ``flightplan`` uses
           :class:`~traffic.algorithms.prediction.flightplan.FlightPlanPredict`
 
+        - ``cfm`` uses
+          :class:`~traffic.algorithms.prediction.cfm.CFMPredict`
+
         Example usage:
 
         >>> flight.predict(minutes=10, method="straight")
@@ -1939,6 +1994,7 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
 
         """
         from ..algorithms.prediction import PredictBase
+        from ..algorithms.prediction.cfm import CFMPredict
         from ..algorithms.prediction.flightplan import FlightPlanPredict
         from ..algorithms.prediction.straightline import StraightLinePredict
 
@@ -1950,6 +2006,7 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
             default=StraightLinePredict,
             straight=StraightLinePredict,
             flightplan=FlightPlanPredict,
+            cfm=CFMPredict,
         )
 
         method = (

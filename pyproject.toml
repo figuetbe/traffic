@@ -83,6 +83,8 @@ lonboard = ["lonboard>=0.10.3; python_version<'3.13'"]
 spark = ["pyspark>=4.0.1"]
 xarray = ["xarray>=2024.10.0"]
 learning = ["scikit-learn>=1.5.2"]
+torch = ["torch>=2.9.1"]
+
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning"]
