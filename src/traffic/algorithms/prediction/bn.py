@@ -7,23 +7,26 @@ providing generative trajectory prediction using an autoregressive Gaussian
 Bayesian Network trained on residuals.
 """
 
+from datetime import timedelta
 from typing import Optional
-import json
-import numpy as np
-import pandas as pd
+
 import torch
 import torch.nn as nn
-from datetime import timedelta
+
+import numpy as np
+import pandas as pd
 
 from ...core.flight import Flight
 from ...core.traffic import Traffic
+from . import PredictorBase
 
 # ---------------------- Model Architecture ----------------------
+
 
 class ResidualGaussianBN(nn.Module):
     """
     Autoregressive Gaussian Bayesian Network trained on residuals.
-    
+
     Predicts a diagonal Gaussian over the next-step residual:
         delta_t = y_t - y_{t-1}
     conditioned on (y_{t-1}, context).
@@ -35,7 +38,10 @@ class ResidualGaussianBN(nn.Module):
         mean_delta: (B, 7)
         log_std:    (B, 7)
     """
-    def __init__(self, state_dim: int = 7, context_dim: int = 8, hidden: int = 512):
+
+    def __init__(
+        self, state_dim: int = 7, context_dim: int = 8, hidden: int = 512
+    ):
         super().__init__()
         in_dim = state_dim + context_dim
         self.state_dim = state_dim
@@ -67,7 +73,10 @@ class ResidualGaussianBN(nn.Module):
         log_std = self.log_std_head(h).clamp(min=-5.0, max=3.0)
         return mean, log_std
 
-def load_model_checkpoint(checkpoint_path: str, device=None) -> tuple[ResidualGaussianBN, Optional[dict]]:
+
+def load_model_checkpoint(
+    checkpoint_path: str, device=None
+) -> tuple[ResidualGaussianBN, Optional[dict]]:
     """Load model checkpoint and return configured model with optional normalization stats.
 
     Args:
@@ -83,7 +92,9 @@ def load_model_checkpoint(checkpoint_path: str, device=None) -> tuple[ResidualGa
     ckpt = torch.load(checkpoint_path, map_location=device)
 
     # Handle potential module prefix issues
-    state = {k.replace("_orig_mod.", ""): v for k, v in ckpt["model_state"].items()}
+    state = {
+        k.replace("_orig_mod.", ""): v for k, v in ckpt["model_state"].items()
+    }
 
     # Get model configuration from checkpoint or use defaults
     cfg = ckpt.get(
@@ -105,7 +116,9 @@ def load_model_checkpoint(checkpoint_path: str, device=None) -> tuple[ResidualGa
 
     return model, norm_stats
 
+
 # ---------------------- Inference Utilities ----------------------
+
 
 @torch.no_grad()
 def bn_rollout(
@@ -117,14 +130,14 @@ def bn_rollout(
 ) -> torch.Tensor:
     """
     Autoregressive rollout in normalized aircraft-centric space.
-    
+
     Args:
         model: ResidualGaussianBN model
         last_hist_state: (B, 7) normalized final history token
         context: (B, 8) normalized context
         horizon: number of future steps (e.g., 12 for 60s at 5s stride)
         temperature: scales std during sampling (0 = deterministic means)
-    
+
     Returns:
         futures_norm: (B, horizon, 7) normalized aircraft-centric trajectory
     """
@@ -145,6 +158,7 @@ def bn_rollout(
         traj.append(nxt)
         prev = nxt
     return torch.stack(traj, dim=1)
+
 
 @torch.no_grad()
 def denorm_seq_to_global(
@@ -172,12 +186,12 @@ def denorm_seq_to_global(
 
     # Convert feature statistics to tensors with proper shape for broadcasting
     # Reshape to (1, 1, D) so they can be broadcasted across batch and time dimensions
-    fm = torch.as_tensor(feat_mean, dtype=seq_norm.dtype, device=seq_norm.device).view(
-        1, 1, -1
-    )
-    fs = torch.as_tensor(feat_std, dtype=seq_norm.dtype, device=seq_norm.device).view(
-        1, 1, -1
-    )
+    fm = torch.as_tensor(
+        feat_mean, dtype=seq_norm.dtype, device=seq_norm.device
+    ).view(1, 1, -1)
+    fs = torch.as_tensor(
+        feat_std, dtype=seq_norm.dtype, device=seq_norm.device
+    ).view(1, 1, -1)
 
     # Denormalize the sequence using feature statistics: seq = seq_norm * std + mean
     seq = seq_norm * fs + fm
@@ -225,6 +239,7 @@ def denorm_seq_to_global(
     # Return the sequence in global coordinates with proper units
     return seq
 
+
 def rotate_xy_inplace(arr: np.ndarray, c: np.ndarray, s: np.ndarray) -> None:
     """Rotate x,y coordinates in-place using rotation matrix [c, -s; s, c]."""
     x = arr[..., 0].astype(np.float64)
@@ -235,6 +250,7 @@ def rotate_xy_inplace(arr: np.ndarray, c: np.ndarray, s: np.ndarray) -> None:
     vy = arr[..., 4].astype(np.float64)
     arr[..., 3] = c[:, None] * vx - s[:, None] * vy
     arr[..., 4] = s[:, None] * vx + c[:, None] * vy
+
 
 def aircraft_centric_transform(
     X_raw: np.ndarray, Y_raw: np.ndarray
@@ -276,7 +292,8 @@ def aircraft_centric_transform(
 
 # ---------------------- BN Predictor Class ----------------------
 
-class BNPredict:
+
+class BNPredict(PredictorBase):
     """Bayesian Network predictor for flight trajectories.
 
     This class implements trajectory prediction using a trained autoregressive
@@ -284,6 +301,8 @@ class BNPredict:
     of historical data and generates probabilistic predictions of future
     trajectory segments.
     """
+
+    method_name = "bn"
 
     def __init__(
         self,
@@ -307,20 +326,22 @@ class BNPredict:
         self.device = torch.device(device)
 
         # Load model and stats
-        self.model, checkpoint_norm_stats = load_model_checkpoint(model_path, self.device)
-        
+        self.model, checkpoint_norm_stats = load_model_checkpoint(
+            model_path, self.device
+        )
+
         if checkpoint_norm_stats is not None:
             self.norm_stats = checkpoint_norm_stats
         else:
-            raise ValueError(
-                "Normalization statistics not found in checkpoint"
-            )
+            raise ValueError("Normalization statistics not found in checkpoint")
 
         self.n_samples = n_samples
         self.temperature = temperature
 
         # Extract stats
-        self.feat_mean = np.array(self.norm_stats["feat_mean"], dtype=np.float32)
+        self.feat_mean = np.array(
+            self.norm_stats["feat_mean"], dtype=np.float32
+        )
         self.feat_std = np.array(self.norm_stats["feat_std"], dtype=np.float32)
         self.ctx_mean = np.array(self.norm_stats["ctx_mean"], dtype=np.float32)
         self.ctx_std = np.array(self.norm_stats["ctx_std"], dtype=np.float32)
@@ -346,16 +367,24 @@ class BNPredict:
 
         # Original prediction times based on output_stride and output_horizon
         original_times = np.arange(
-            self.output_stride, self.output_horizon + 1, self.output_stride, dtype=float
+            self.output_stride,
+            self.output_horizon + 1,
+            self.output_stride,
+            dtype=float,
         )  # [output_stride, 2*output_stride, ..., output_horizon]
 
         new_times = np.arange(
-            self.output_stride, self.output_horizon + 1e-6, sampling_rate, dtype=float
+            self.output_stride,
+            self.output_horizon + 1e-6,
+            sampling_rate,
+            dtype=float,
         )  # [output_stride, output_stride+sampling_rate, ..., output_horizon]
 
         # Interpolate along time for each feature independently
         out = torch.empty(
-            (S, len(new_times), D), dtype=predictions.dtype, device=predictions.device
+            (S, len(new_times), D),
+            dtype=predictions.dtype,
+            device=predictions.device,
         )
 
         pred_np = predictions.detach().cpu().numpy()  # (S,T,D)
@@ -363,13 +392,18 @@ class BNPredict:
         for f in range(D):
             vals = pred_np[:, :, f]  # (S,T)
             res = np.vstack(
-                [np.interp(new_times, original_times, vals_i) for vals_i in vals]
+                [
+                    np.interp(new_times, original_times, vals_i)
+                    for vals_i in vals
+                ]
             )  # (S, len(new_times))
             out[:, :, f] = torch.from_numpy(res).to(out.device, out.dtype)
 
         return out
 
-    def preprocess_flight(self, flight: Flight) -> tuple[np.ndarray, pd.Timestamp]:
+    def preprocess_flight(
+        self, flight: Flight
+    ) -> tuple[np.ndarray, pd.Timestamp]:
         """Preprocess flight data for model input.
 
         Args:
@@ -381,7 +415,9 @@ class BNPredict:
         # Get last input_len seconds of data
         window = flight.last(seconds=self.input_len)
         if window is None or len(window.data) < self.input_len:
-            raise ValueError(f"Flight must have at least {self.input_len} seconds of data")
+            raise ValueError(
+                f"Flight must have at least {self.input_len} seconds of data"
+            )
 
         df = window.data.copy()
 
@@ -393,16 +429,21 @@ class BNPredict:
 
         # Assume input is already properly sorted and resampled to exactly input_len samples at 1Hz
         if len(df) != self.input_len:
-            raise ValueError(f"Expected exactly {self.input_len} samples, got {len(df)}")
+            raise ValueError(
+                f"Expected exactly {self.input_len} samples, got {len(df)}"
+            )
 
         # Get last timestamp for prediction start
         last_timestamp = df["timestamp"].iloc[-1]
 
         # Convert coordinates to LV95
         import pyproj
+
         crs_lv95 = pyproj.CRS.from_epsg(2056)
         crs_wgs84 = pyproj.CRS.from_epsg(4326)
-        to_lv95 = pyproj.Transformer.from_crs(crs_wgs84, crs_lv95, always_xy=True)
+        to_lv95 = pyproj.Transformer.from_crs(
+            crs_wgs84, crs_lv95, always_xy=True
+        )
 
         x_coords, y_coords = to_lv95.transform(
             df["longitude"].to_numpy(), df["latitude"].to_numpy()
@@ -431,7 +472,9 @@ class BNPredict:
         dot = vxm * vx + vym * vy
         psi_rate = -np.arctan2(cross, dot)
         df["psi_rate"] = pd.Series(psi_rate, index=df.index)
-        df["psi_rate"] = np.nan_to_num(df["psi_rate"], nan=0.0, posinf=0.0, neginf=0.0)
+        df["psi_rate"] = np.nan_to_num(
+            df["psi_rate"], nan=0.0, posinf=0.0, neginf=0.0
+        )
         df["psi_rate"] = np.clip(df["psi_rate"], -0.25, 0.25)
 
         # Extract features
@@ -461,7 +504,9 @@ class BNPredict:
 
         # Normalize
         X_norm = ((X_t - self.feat_mean) / self.feat_std).astype(np.float32)
-        C_norm = ((C_raw - self.ctx_mean[:len(C_raw)]) / self.ctx_std[:len(C_raw)]).astype(np.float32)
+        C_norm = (
+            (C_raw - self.ctx_mean[: len(C_raw)]) / self.ctx_std[: len(C_raw)]
+        ).astype(np.float32)
 
         # Convert to tensors
         x_hist = torch.from_numpy(X_norm).unsqueeze(0).to(self.device)
@@ -486,44 +531,68 @@ class BNPredict:
 
         # Denormalize and convert back to global coordinates
         futures_global = denorm_seq_to_global(
-            futures_norm, repeated_ctx, self.feat_mean, self.feat_std, self.ctx_mean, self.ctx_std
+            futures_norm,
+            repeated_ctx,
+            self.feat_mean,
+            self.feat_std,
+            self.ctx_mean,
+            self.ctx_std,
         )
 
         # Resample predictions from 5s intervals to 1s intervals for smoother output
-        futures_global = self._resample_predictions(futures_global, T_out, sampling_rate=1)
+        futures_global = self._resample_predictions(
+            futures_global, T_out, sampling_rate=1
+        )
 
         # Convert to lat/lon/alt
         futures_np = futures_global.detach().cpu().numpy()
         import pyproj
+
         crs_lv95 = pyproj.CRS.from_epsg(2056)
         crs_wgs84 = pyproj.CRS.from_epsg(4326)
-        to_wgs84 = pyproj.Transformer.from_crs(crs_lv95, crs_wgs84, always_xy=True)
+        to_wgs84 = pyproj.Transformer.from_crs(
+            crs_lv95, crs_wgs84, always_xy=True
+        )
 
         predicted_flights = []
         for i in range(self.n_samples):
-            lon, lat = to_wgs84.transform(futures_np[i, :, 0], futures_np[i, :, 1])
+            lon, lat = to_wgs84.transform(
+                futures_np[i, :, 0], futures_np[i, :, 1]
+            )
             alt_ft = futures_np[i, :, 2] / 0.3048
 
             # Create timestamps for predictions (1s intervals from last_timestamp + output_stride)
             # Predictions start at output_stride seconds (model's native prediction interval)
             pred_timestamps = [
                 last_timestamp + timedelta(seconds=self.output_stride + j)
-                for j in range(len(lon))  # Match the number of prediction points
+                for j in range(
+                    len(lon)
+                )  # Match the number of prediction points
             ]
 
             # Create flight data for this prediction
-            flight_id = flight.flight_id if flight.flight_id is not None else (flight.callsign if flight.callsign is not None else "predicted")
+            flight_id = (
+                flight.flight_id
+                if flight.flight_id is not None
+                else (
+                    flight.callsign
+                    if flight.callsign is not None
+                    else "predicted"
+                )
+            )
             if self.n_samples > 1:
                 # Add sample index to distinguish multiple predictions
                 flight_id = f"{flight_id}_sample_{i}"
 
-            pred_data = pd.DataFrame({
-                "timestamp": pred_timestamps,
-                "latitude": lat,
-                "longitude": lon,
-                "altitude": alt_ft,
-                "flight_id": flight_id,
-            })
+            pred_data = pd.DataFrame(
+                {
+                    "timestamp": pred_timestamps,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "altitude": alt_ft,
+                    "flight_id": flight_id,
+                }
+            )
 
             # Create flight with only predicted data (no historical data)
             predicted_flights.append(Flight(pred_data))

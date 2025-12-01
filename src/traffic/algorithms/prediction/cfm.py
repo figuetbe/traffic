@@ -19,6 +19,7 @@ import pandas as pd
 
 from ...core.flight import Flight
 from ...core.traffic import Traffic
+from . import PredictorBase
 
 # ---------------------- Model Architecture ----------------------
 
@@ -418,7 +419,7 @@ def aircraft_centric_transform(
 # ---------------------- CFM Predictor Class ----------------------
 
 
-class CFMPredict:
+class CFMPredict(PredictorBase):
     """Conditional Flow Matching predictor for flight trajectories.
 
     This class implements trajectory prediction using a trained conditional
@@ -426,6 +427,8 @@ class CFMPredict:
     of historical data and generates probabilistic predictions of future
     trajectory segments.
     """
+
+    method_name = "cfm"
 
     def __init__(
         self,

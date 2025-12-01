@@ -10,6 +10,7 @@ from ...core import types as tt
 from ...core.flight import Flight, Position
 from ...core.flightplan import FlightPlan
 from ...core.mixins import PointLike, PointMixin
+from . import PredictorBase
 
 
 @dataclass
@@ -24,7 +25,7 @@ class Point(PointMixin):
         return f"{self.name} ({self.latitude:.4}, {self.longitude:.4})"
 
 
-class FlightPlanPredict:
+class FlightPlanPredict(PredictorBase):
     """
     A class to predict the flight path of an aircraft based on a given
     flight plan and prediction start time.
@@ -43,6 +44,8 @@ class FlightPlanPredict:
         min_distance (int): The minimum distance for considering
             navigational points during alignment.
     """
+
+    method_name = "flightplan"
 
     def __init__(
         self,

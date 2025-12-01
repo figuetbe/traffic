@@ -1835,70 +1835,6 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
 
         return res
 
-    def predict(
-        self,
-        method: str = "extrapolate",
-        **kwargs: Any,
-    ) -> Flight | Traffic:
-        """Generate trajectory predictions using various prediction methods.
-
-        This method extends the flight trajectory by generating predicted
-        future positions based on the historical trajectory data.
-
-        Args:
-            method: Prediction method to use. Available methods:
-                - "extrapolate": Simple straight-line extrapolation with configurable duration and sampling rate
-                - "cfm": Conditional Flow Matching (requires model_path and stats_path)
-                - "bn": Bayesian Network prediction (requires model_path)
-                - Other methods may be added in the future
-            **kwargs: Method-specific parameters
-
-        Returns:
-            Flight object with extended trajectory including predictions if n_futures=1,
-            or Traffic object containing multiple predicted trajectories if n_futures>1
-
-        Examples:
-            >>> # Straight line extrapolation for 2 minutes at 1Hz
-            >>> flight.predict(method="extrapolate", duration="2 minutes", sampling_rate=1.0)
-            >>>
-            >>> # CFM prediction with single future
-            >>> flight.predict(
-            ...     method="cfm",
-            ...     model_path="path/to/model.pt",
-            ...     stats_path="path/to/stats.json",
-            ...     n_samples=1
-            ... )
-            >>>
-            >>> # CFM prediction with multiple futures
-            >>> flight.predict(
-            ...     method="cfm",
-            ...     model_path="path/to/model.pt",
-            ...     stats_path="path/to/stats.json",
-            ...     n_samples=10
-            ... )
-            >>>
-            >>> # BN prediction with multiple futures
-            >>> flight.predict(
-            ...     method="bn",
-            ...     model_path="path/to/model.pt",
-            ...     n_samples=10
-            ... )
-        """
-        if method == "straight_line":
-            from ...algorithms.prediction.straightline import StraightLinePredict
-            predictor = StraightLinePredict(**kwargs)
-            return predictor.predict(self)
-        elif method == "cfm":
-            from ...algorithms.prediction.cfm import CFMPredict
-            predictor = CFMPredict(**kwargs)
-            return predictor.predict(self)
-        elif method == "bn":
-            from ...algorithms.prediction.bn import BNPredict
-            predictor = BNPredict(**kwargs)
-            return predictor.predict(self)
-        else:
-            raise ValueError(f"Unknown prediction method: {method}")
-
     def filter(
         self,
         filter: Literal["default", "aggressive"]
@@ -1974,7 +1910,13 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
     def predict(
         self,
         *args: Any,
-        method: Literal["default", "extrapolate", "straight", "straight_line", "flightplan", "cfm", "bn"]
+        method: Literal[
+            "default",
+            "flightplan",
+            "cfm",
+            "bn",
+            "linear_extrapolation",
+        ]
         | PredictBase = "default",
         **kwargs: Any,
     ) -> Flight | Traffic:
@@ -1984,20 +1926,16 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
           straight line.
 
         If the method argument is passed as a string, then all args and kwargs
-        argument of the landing method are passed to the constructor of the
-        corresponding prediction class.
+        are passed to the constructor of the corresponding prediction class.
 
         The following table summarizes the available methods and their
         corresponding classes:
 
-        - ``extrapolate`` (default) uses
-          :class:`~traffic.algorithms.prediction.straightline.StraightLinePredict`
+        - ``default`` (default) uses
+          :class:`~traffic.algorithms.prediction.linearextrapolation.LinearExtrapolation`
 
-        - ``straight`` (alias for ``extrapolate``) uses
-          :class:`~traffic.algorithms.prediction.straightline.StraightLinePredict`
-
-        - ``straight_line`` (alias for ``extrapolate``) uses
-          :class:`~traffic.algorithms.prediction.straightline.StraightLinePredict`
+        - ``linear_extrapolation`` uses
+          :class:`~traffic.algorithms.prediction.linearextrapolation.LinearExtrapolation`
 
         - ``flightplan`` uses
           :class:`~traffic.algorithms.prediction.flightplan.FlightPlanPredict`
@@ -2010,51 +1948,75 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
 
         Example usage:
 
-        >>> flight.predict(minutes=10, method="straight")
+        >>> flight.predict(minutes=10, method="linear_extrapolation")
         >>> flight.before("2018-12-24 23:55").predict(minutes=10)  # Merry XMas!
 
         """
-        from ..algorithms.prediction import PredictBase
-        from ..algorithms.prediction.bn import BNPredict
-        from ..algorithms.prediction.cfm import CFMPredict
-        from ..algorithms.prediction.flightplan import FlightPlanPredict
-        from ..algorithms.prediction.straightline import StraightLinePredict
+        from ..algorithms.prediction import PredictBase, PredictionRegistry
 
         if len(args) and isinstance(args[0], PredictBase):
             method = args[0]
             args = tuple(*args[1:])
 
-        method_dict = dict(
-            default=StraightLinePredict,
-            extrapolate=StraightLinePredict,
-            straight=StraightLinePredict,
-            straight_line=StraightLinePredict,
-            flightplan=FlightPlanPredict,
-            cfm=CFMPredict,
-            bn=BNPredict,
-        )
+        if isinstance(method, str):
+            # Map old method names to new registry names for backward compatibility
+            method_name_map = dict(
+                default="linear_extrapolation",
+                flightplan="flightplan",  # Assuming flightplan exists
+                cfm="cfm",
+                bn="bn",
+            )
 
-        method = (
-            method_dict[method](*args, **kwargs)
-            if isinstance(method, str)
-            else method
-        )
+            registry_method = method_name_map.get(method, method)
 
-        return method.predict(self)
+            # Validate that the method exists
+            try:
+                method = PredictionRegistry.create_predictor(
+                    registry_method, *args, **kwargs
+                )
+            except ValueError as e:
+                if "Unknown prediction method" in str(e):
+                    available_methods = PredictionRegistry.list_methods()
+                    # Also include legacy method names for better error messages
+                    legacy_names = list(method_name_map.keys())
+                    all_available = available_methods + [
+                        name
+                        for name in legacy_names
+                        if name not in method_name_map.values()
+                    ]
+                    available_str = ", ".join(sorted(set(all_available)))
+                    raise ValueError(
+                        f"Unknown prediction method '{method}'. "
+                        f"Available methods: {available_str}"
+                    ) from e
+                else:
+                    raise
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to create predictor '{method}': {e}"
+                ) from e
+
+        try:
+            return method.predict(self)
+        except Exception as e:
+            method_name = getattr(method, "method_name", str(method))
+            raise RuntimeError(
+                f"Prediction failed with method '{method_name}': {e}"
+            ) from e
 
     def forward(
         self,
         forward: Union[None, str, pd.Timedelta] = None,
         **kwargs: Any,
     ) -> "Flight":  # DEPRECATED
-        from ..algorithms.prediction.straightline import StraightLinePredict
+        from ..algorithms.prediction.linearextrapolation import LinearExtrapolation
 
         warnings.warn(
             "Deprecated forward method, use .predict() instead",
             DeprecationWarning,
         )
 
-        return StraightLinePredict(forward, **kwargs).predict(self)
+        return LinearExtrapolation(forward, **kwargs).predict(self)
 
     # -- Air traffic management --
 
