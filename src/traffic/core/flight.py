@@ -1849,6 +1849,7 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
             method: Prediction method to use. Available methods:
                 - "extrapolate": Simple straight-line extrapolation with configurable duration and sampling rate
                 - "cfm": Conditional Flow Matching (requires model_path and stats_path)
+                - "bn": Bayesian Network prediction (requires model_path)
                 - Other methods may be added in the future
             **kwargs: Method-specific parameters
 
@@ -1875,6 +1876,13 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
             ...     stats_path="path/to/stats.json",
             ...     n_samples=10
             ... )
+            >>>
+            >>> # BN prediction with multiple futures
+            >>> flight.predict(
+            ...     method="bn",
+            ...     model_path="path/to/model.pt",
+            ...     n_samples=10
+            ... )
         """
         if method == "straight_line":
             from ...algorithms.prediction.straightline import StraightLinePredict
@@ -1883,6 +1891,10 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
         elif method == "cfm":
             from ...algorithms.prediction.cfm import CFMPredict
             predictor = CFMPredict(**kwargs)
+            return predictor.predict(self)
+        elif method == "bn":
+            from ...algorithms.prediction.bn import BNPredict
+            predictor = BNPredict(**kwargs)
             return predictor.predict(self)
         else:
             raise ValueError(f"Unknown prediction method: {method}")
@@ -1962,7 +1974,7 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
     def predict(
         self,
         *args: Any,
-        method: Literal["default", "extrapolate", "straight", "straight_line", "flightplan", "cfm"]
+        method: Literal["default", "extrapolate", "straight", "straight_line", "flightplan", "cfm", "bn"]
         | PredictBase = "default",
         **kwargs: Any,
     ) -> Flight | Traffic:
@@ -1993,6 +2005,9 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
         - ``cfm`` uses
           :class:`~traffic.algorithms.prediction.cfm.CFMPredict`
 
+        - ``bn`` uses
+          :class:`~traffic.algorithms.prediction.bn.BNPredict`
+
         Example usage:
 
         >>> flight.predict(minutes=10, method="straight")
@@ -2000,6 +2015,7 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
 
         """
         from ..algorithms.prediction import PredictBase
+        from ..algorithms.prediction.bn import BNPredict
         from ..algorithms.prediction.cfm import CFMPredict
         from ..algorithms.prediction.flightplan import FlightPlanPredict
         from ..algorithms.prediction.straightline import StraightLinePredict
@@ -2015,6 +2031,7 @@ class Flight(HBoxMixin, GeographyMixin, ShapelyMixin, metaclass=MetaFlight):
             straight_line=StraightLinePredict,
             flightplan=FlightPlanPredict,
             cfm=CFMPredict,
+            bn=BNPredict,
         )
 
         method = (
