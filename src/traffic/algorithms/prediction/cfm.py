@@ -3,21 +3,22 @@
 Conditional Flow Matching (CFM) prediction for aircraft trajectories.
 
 This module implements the CFM prediction method for the Traffic library,
-providing generative trajectory prediction using a conditional flow matching model.
+providing generative traj prediction using a conditional flow matching model.
 """
 
-import math
-from typing import Optional
 import json
-import numpy as np
-import pandas as pd
+import math
+from datetime import timedelta
+from typing import Optional
+
 import torch
 import torch.nn as nn
-from datetime import timedelta
+
+import numpy as np
+import pandas as pd
 
 from ...core.flight import Flight
 from ...core.traffic import Traffic
-
 
 # ---------------------- Model Architecture ----------------------
 
@@ -49,7 +50,9 @@ class TimeEmbedding(nn.Module):
         self.register_buffer(
             "freqs",
             torch.exp(
-                torch.linspace(0, math.log(10_000), emb_dim // 2, dtype=torch.float32)
+                torch.linspace(
+                    0, math.log(10_000), emb_dim // 2, dtype=torch.float32
+                )
             ),
         )
         self.proj = nn.Sequential(
@@ -60,17 +63,23 @@ class TimeEmbedding(nn.Module):
         if t.dim() == 2 and t.size(-1) == 1:
             t = t.squeeze(-1)
         ang = t.unsqueeze(-1) * self.freqs  # (B, F)
-        temb = torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)  # (B, emb_dim)
+        temb = torch.cat(
+            [torch.sin(ang), torch.cos(ang)], dim=-1
+        )  # (B, emb_dim)
         return self.proj(temb)  # (B, d_model)
 
 
 class HistoryEncoder(nn.Module):
     """Transformer encoder for processing flight history sequences."""
 
-    def __init__(self, in_dim, d_model, nhead, num_layers, ff, dropout, context_dim=3):
+    def __init__(
+        self, in_dim, d_model, nhead, num_layers, ff, dropout, context_dim=3
+    ):
         super().__init__()
         self.input = nn.Linear(in_dim, d_model)
-        self.context_proj = nn.Linear(context_dim, d_model) if context_dim > 0 else None
+        self.context_proj = (
+            nn.Linear(context_dim, d_model) if context_dim > 0 else None
+        )
         self.pos = SinusoidalPositionalEncoding(d_model, max_len=1024)
         enc_layer = nn.TransformerEncoderLayer(
             d_model, nhead, ff, dropout, batch_first=True, norm_first=True
@@ -142,10 +151,18 @@ class FlowMatchingModel(nn.Module):
         if d_model % nhead != 0:
             raise ValueError("d_model must be divisible by nhead")
         self.encoder = HistoryEncoder(
-            in_dim, d_model, nhead, enc_layers, ff, dropout, context_dim=context_dim
+            in_dim,
+            d_model,
+            nhead,
+            enc_layers,
+            ff,
+            dropout,
+            context_dim=context_dim,
         )
         self.time_emb = TimeEmbedding(d_model=d_model)
-        self.denoiser = FutureDenoiser(in_dim, d_model, nhead, dec_layers, ff, dropout)
+        self.denoiser = FutureDenoiser(
+            in_dim, d_model, nhead, dec_layers, ff, dropout
+        )
 
     def forward(self, x_hist, x_t, t_scalar, context):
         mem = self.encoder(x_hist, context)
@@ -153,7 +170,9 @@ class FlowMatchingModel(nn.Module):
         return self.denoiser(x_t, mem, t_emb)
 
 
-def load_model_checkpoint(checkpoint_path: str, device=None) -> FlowMatchingModel:
+def load_model_checkpoint(
+    checkpoint_path: str, device=None
+) -> FlowMatchingModel:
     """Load model checkpoint and return configured model.
 
     Args:
@@ -169,7 +188,9 @@ def load_model_checkpoint(checkpoint_path: str, device=None) -> FlowMatchingMode
     ckpt = torch.load(checkpoint_path, map_location=device)
 
     # Handle potential module prefix issues
-    state = {k.replace("_orig_mod.", ""): v for k, v in ckpt["model_state"].items()}
+    state = {
+        k.replace("_orig_mod.", ""): v for k, v in ckpt["model_state"].items()
+    }
 
     # Get model configuration from checkpoint or use defaults
     cfg = ckpt.get(
@@ -225,7 +246,7 @@ def sample_future_heun(
     model.eval()
     B, _, D = x_hist.shape
 
-    # Initialize the future trajectory with random noise from standard normal distribution
+    # Init the future traj with random noise from standard normal distribution
     x = torch.randn(B, T_out, D, device=x_hist.device, dtype=x_hist.dtype)
 
     # Calculate time step size for discretizing the continuous flow
@@ -259,7 +280,7 @@ def sample_future_heun(
             # Compute velocity field at predicted position and next time t1
             v2 = model(x_hist, x_pred, t1, context)
 
-            # Take weighted average of velocities and update position (corrector step)
+            # Take weighted avg of velocities and update pos (corrector step)
             x = x + 0.5 * (G * v1 + G * v2) * dt
     return x
 
@@ -289,15 +310,15 @@ def denorm_seq_to_global(
     B, T, D = seq_norm.shape
 
     # Convert feature statistics to tensors with proper shape for broadcasting
-    # Reshape to (1, 1, D) so they can be broadcasted across batch and time dimensions
-    fm = torch.as_tensor(feat_mean, dtype=seq_norm.dtype, device=seq_norm.device).view(
-        1, 1, -1
-    )
-    fs = torch.as_tensor(feat_std, dtype=seq_norm.dtype, device=seq_norm.device).view(
-        1, 1, -1
-    )
+    # Reshape to (1, 1, D) so they can be broadcasted across batch and time dim
+    fm = torch.as_tensor(
+        feat_mean, dtype=seq_norm.dtype, device=seq_norm.device
+    ).view(1, 1, -1)
+    fs = torch.as_tensor(
+        feat_std, dtype=seq_norm.dtype, device=seq_norm.device
+    ).view(1, 1, -1)
 
-    # Denormalize the sequence using feature statistics: seq = seq_norm * std + mean
+    # Denorma the sequence using feature stats: seq = seq_norm * std + mean
     seq = seq_norm * fs + fm
 
     # Get context dimension and convert context statistics to tensors
@@ -318,7 +339,7 @@ def denorm_seq_to_global(
     s = ctx_raw[:, 4:5]  # sin(heading)
 
     # Rotate position coordinates from aircraft-centric to global frame
-    # Use R^T (transpose/inverse of rotation matrix): [cos θ, sin θ; -sin θ, cos θ]
+    # Use R^T (transpose/inv of rotation matrix): [cos θ, sin θ; -sin θ, cos θ]
     x_local = seq[..., 0]  # aircraft-centric x (forward direction)
     y_local = seq[..., 1]  # aircraft-centric y (right direction)
     x_global = c * x_local + s * y_local  # compute before assignment
@@ -439,7 +460,9 @@ class CFMPredict:
         self.guidance_scale = guidance_scale
 
         # Extract stats
-        self.feat_mean = np.array(self.norm_stats["feat_mean"], dtype=np.float32)
+        self.feat_mean = np.array(
+            self.norm_stats["feat_mean"], dtype=np.float32
+        )
         self.feat_std = np.array(self.norm_stats["feat_std"], dtype=np.float32)
         self.ctx_mean = np.array(self.norm_stats["ctx_mean"], dtype=np.float32)
         self.ctx_std = np.array(self.norm_stats["ctx_std"], dtype=np.float32)
@@ -451,7 +474,8 @@ class CFMPredict:
         Resample predictions from 5s intervals to desired sampling rate.
 
         predictions: (n_samples, 12, D) at +5,+10,…,+60 seconds
-        sampling_rate: new step in seconds. We resample onto [5, 5+sampling_rate, 5+2*sampling_rate, …, 60].
+        sampling_rate: new step in seconds.
+        We resample onto [5, 5+sampling_rate, 5+2*sampling_rate, …, 60].
         """
         assert predictions.dim() == 3, "predictions must be (S, T, D)"
 
@@ -466,7 +490,9 @@ class CFMPredict:
 
         # Interpolate along time for each feature independently
         out = torch.empty(
-            (S, len(new_times), D), dtype=predictions.dtype, device=predictions.device
+            (S, len(new_times), D),
+            dtype=predictions.dtype,
+            device=predictions.device,
         )
 
         pred_np = predictions.detach().cpu().numpy()  # (S,T,D)
@@ -474,13 +500,18 @@ class CFMPredict:
         for f in range(D):
             vals = pred_np[:, :, f]  # (S,T)
             res = np.vstack(
-                [np.interp(new_times, original_times, vals_i) for vals_i in vals]
+                [
+                    np.interp(new_times, original_times, vals_i)
+                    for vals_i in vals
+                ]
             )  # (S, len(new_times))
             out[:, :, f] = torch.from_numpy(res).to(out.device, out.dtype)
 
         return out
 
-    def preprocess_flight(self, flight: Flight) -> tuple[np.ndarray, pd.Timestamp]:
+    def preprocess_flight(
+        self, flight: Flight
+    ) -> tuple[np.ndarray, pd.Timestamp]:
         """Preprocess flight data for model input.
 
         Args:
@@ -502,7 +533,7 @@ class CFMPredict:
         # Sort by timestamp
         df = df.sort_values("timestamp").reset_index(drop=True)
 
-        # Assume input is already properly sorted and resampled to exactly 60 samples at 1Hz
+        # Assume input is already sorted and resampled to 60 samples at 1Hz
         if len(df) != 60:
             raise ValueError(f"Expected exactly 60 samples, got {len(df)}")
 
@@ -511,9 +542,12 @@ class CFMPredict:
 
         # Convert coordinates to LV95
         import pyproj
+
         crs_lv95 = pyproj.CRS.from_epsg(2056)
         crs_wgs84 = pyproj.CRS.from_epsg(4326)
-        to_lv95 = pyproj.Transformer.from_crs(crs_wgs84, crs_lv95, always_xy=True)
+        to_lv95 = pyproj.Transformer.from_crs(
+            crs_wgs84, crs_lv95, always_xy=True
+        )
 
         x_coords, y_coords = to_lv95.transform(
             df["longitude"].to_numpy(), df["latitude"].to_numpy()
@@ -542,7 +576,9 @@ class CFMPredict:
         dot = vxm * vx + vym * vy
         psi_rate = -np.arctan2(cross, dot)
         df["psi_rate"] = pd.Series(psi_rate, index=df.index)
-        df["psi_rate"] = np.nan_to_num(df["psi_rate"], nan=0.0, posinf=0.0, neginf=0.0)
+        df["psi_rate"] = np.nan_to_num(
+            df["psi_rate"], nan=0.0, posinf=0.0, neginf=0.0
+        )
         df["psi_rate"] = np.clip(df["psi_rate"], -0.25, 0.25)
 
         # Extract features
@@ -559,7 +595,7 @@ class CFMPredict:
 
         Returns:
             Flight object containing the predicted trajectory if n_samples=1,
-            or Traffic object containing multiple predicted trajectories if n_samples>1
+            or Traffic object containing multiple predicted trajs if n_samples>1
         """
         # Preprocess flight data
         X_raw, last_timestamp = self.preprocess_flight(flight)
@@ -572,7 +608,9 @@ class CFMPredict:
 
         # Normalize
         X_norm = ((X_t - self.feat_mean) / self.feat_std).astype(np.float32)
-        C_norm = ((C_raw - self.ctx_mean[:len(C_raw)]) / self.ctx_std[:len(C_raw)]).astype(np.float32)
+        C_norm = (
+            (C_raw - self.ctx_mean[: len(C_raw)]) / self.ctx_std[: len(C_raw)]
+        ).astype(np.float32)
 
         # Convert to tensors
         x_hist = torch.from_numpy(X_norm).unsqueeze(0).to(self.device)
@@ -596,43 +634,63 @@ class CFMPredict:
         # Denormalize and convert back to global coordinates
         ctx_rep = ctx.repeat(self.n_samples, 1)
         futures_global = denorm_seq_to_global(
-            futures_norm, ctx_rep, self.feat_mean, self.feat_std, self.ctx_mean, self.ctx_std
+            futures_norm,
+            ctx_rep,
+            self.feat_mean,
+            self.feat_std,
+            self.ctx_mean,
+            self.ctx_std,
         )
 
-        # Resample predictions from 5s intervals to 1s intervals for smoother output
-        futures_global = self._resample_predictions(futures_global, T_out, sampling_rate=1)
+        # Resample preds from 5s intervals to 1s intervals for smoother output
+        futures_global = self._resample_predictions(
+            futures_global, T_out, sampling_rate=1
+        )
 
         # Convert to lat/lon/alt
         futures_np = futures_global.detach().cpu().numpy()
         import pyproj
+
         crs_lv95 = pyproj.CRS.from_epsg(2056)
         crs_wgs84 = pyproj.CRS.from_epsg(4326)
-        to_wgs84 = pyproj.Transformer.from_crs(crs_lv95, crs_wgs84, always_xy=True)
+        to_wgs84 = pyproj.Transformer.from_crs(
+            crs_lv95, crs_wgs84, always_xy=True
+        )
 
         predicted_flights = []
         for i in range(self.n_samples):
-            lon, lat = to_wgs84.transform(futures_np[i, :, 0], futures_np[i, :, 1])
+            lon, lat = to_wgs84.transform(
+                futures_np[i, :, 0], futures_np[i, :, 1]
+            )
             alt_ft = futures_np[i, :, 2] / 0.3048
 
-            # Create timestamps for predictions (1s intervals from last_timestamp + 1s)
+            # Create tstamps for preds (1s intervals from last_timestamp + 1s)
             pred_timestamps = [
-                last_timestamp + timedelta(seconds=j+1)
+                last_timestamp + timedelta(seconds=j + 1)
                 for j in range(60)  # 60 seconds at 1Hz
-            ][:len(lon)]  # Ensure we don't have more timestamps than predictions
+            ][
+                : len(lon)
+            ]  # Ensure we don't have more timestamps than predictions
 
             # Create flight data for this prediction
-            flight_id = flight.identifier if hasattr(flight, 'identifier') else "predicted"
+            flight_id = (
+                flight.identifier
+                if hasattr(flight, "identifier")
+                else "predicted"
+            )
             if self.n_samples > 1:
                 # Add sample index to distinguish multiple predictions
                 flight_id = f"{flight_id}_sample_{i}"
 
-            pred_data = pd.DataFrame({
-                "timestamp": pred_timestamps,
-                "latitude": lat,
-                "longitude": lon,
-                "altitude": alt_ft,
-                "flight_id": flight_id,
-            })
+            pred_data = pd.DataFrame(
+                {
+                    "timestamp": pred_timestamps,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "altitude": alt_ft,
+                    "flight_id": flight_id,
+                }
+            )
 
             # Create flight with only predicted data (no historical data)
             predicted_flights.append(Flight(pred_data))
