@@ -32,8 +32,10 @@ class ResidualGaussianBN(nn.Module):
     conditioned on (y_{t-1}, context).
 
     Inputs per step:
-        prev_state: (B, 7)  = [x, y, z, vx, vy, vz, psi_rate]  (normalized)
-        context:    (B, 8)  = [x0,y0,z0,cos,sin,gs_last,vz_last,psi_rate_last] (normalized)
+        prev_state: (B, 7)  = [x, y, z, vx, vy, vz, psi_rate]
+        (normalized)
+        context:    (B, 8)  = [x0,y0,z0,cos,sin,gs_last,vz_last,psi_rate_last]
+        (normalized)
     Outputs per step:
         mean_delta: (B, 7)
         log_std:    (B, 7)
@@ -69,7 +71,7 @@ class ResidualGaussianBN(nn.Module):
         # Repeat context across time if needed (caller aligns shapes)
         h = self.net(torch.cat([prev_state, context], dim=-1))
         mean = self.mean_head(h)
-        # Small floor to avoid zero-variance pathologies; stays in normalized space
+        # Small floor to avoid zero-variance pathologies; stays in norm space
         log_std = self.log_std_head(h).clamp(min=-5.0, max=3.0)
         return mean, log_std
 
@@ -77,7 +79,7 @@ class ResidualGaussianBN(nn.Module):
 def load_model_checkpoint(
     checkpoint_path: str, device=None
 ) -> tuple[ResidualGaussianBN, Optional[dict]]:
-    """Load model checkpoint and return configured model with optional normalization stats.
+    """Load model ckpt and return configured model with optional norm stats.
 
     Args:
         checkpoint_path: Path to the checkpoint file
@@ -142,7 +144,7 @@ def bn_rollout(
         futures_norm: (B, horizon, 7) normalized aircraft-centric trajectory
     """
     device = next(model.parameters()).device
-    B = last_hist_state.size(0)
+    # B = last_hist_state.size(0)
     prev = last_hist_state.to(device)
     ctx = context.to(device)
     traj = []
@@ -182,10 +184,10 @@ def denorm_seq_to_global(
         (B, T, D) in global coordinates/units
     """
     # Extract dimensions for tensor operations
-    B, T, D = seq_norm.shape
+    B, _T, _D = seq_norm.shape
 
     # Convert feature statistics to tensors with proper shape for broadcasting
-    # Reshape to (1, 1, D) so they can be broadcasted across batch and time dimensions
+    # Reshape to (1, 1, D) so they can be broadcasted across batch and time dim
     fm = torch.as_tensor(
         feat_mean, dtype=seq_norm.dtype, device=seq_norm.device
     ).view(1, 1, -1)
@@ -193,7 +195,7 @@ def denorm_seq_to_global(
         feat_std, dtype=seq_norm.dtype, device=seq_norm.device
     ).view(1, 1, -1)
 
-    # Denormalize the sequence using feature statistics: seq = seq_norm * std + mean
+    # Denorm the sequence using feature statistics: seq = seq_norm * std + mean
     seq = seq_norm * fs + fm
 
     # Get context dimension and convert context statistics to tensors
@@ -214,7 +216,7 @@ def denorm_seq_to_global(
     s = ctx_raw[:, 4:5]  # sin(heading)
 
     # Rotate position coordinates from aircraft-centric to global frame
-    # Use R^T (transpose/inverse of rotation matrix): [cos θ, sin θ; -sin θ, cos θ]
+    # Use R^T (transpose/inv of rotation matrix): [cos θ, sin θ; -sin θ, cos θ]
     x_local = seq[..., 0]  # aircraft-centric x (forward direction)
     y_local = seq[..., 1]  # aircraft-centric y (right direction)
     x_global = c * x_local + s * y_local  # compute before assignment
@@ -297,7 +299,7 @@ class BNPredict(PredictorBase):
     """Bayesian Network predictor for flight trajectories.
 
     This class implements trajectory prediction using a trained autoregressive
-    Gaussian Bayesian Network model. It takes a Flight object with at least 60 seconds
+    Gaussian Bayesian Network model. It takes a Flight object with at least 60s
     of historical data and generates probabilistic predictions of future
     trajectory segments.
     """
@@ -309,7 +311,7 @@ class BNPredict(PredictorBase):
         model_path: str,
         device: Optional[str] = None,
         n_samples: int = 10,
-        temperature: float = 1.0,
+        temperature: float = 0.4,
     ):
         """Initialize the BN predictor.
 
@@ -319,7 +321,7 @@ class BNPredict(PredictorBase):
                        If None, will try to load norm_stats from the checkpoint.
             device: Device to run inference on ('cuda', 'cpu', etc.)
             n_samples: Number of trajectory samples to generate
-            temperature: Sampling temperature (0 = deterministic, >0 = stochastic)
+            temperature: Sampling temperature (0=deterministic, >0=stochastic)
         """
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -356,14 +358,16 @@ class BNPredict(PredictorBase):
         self, predictions: torch.Tensor, T_out: int, sampling_rate: float
     ) -> torch.Tensor:
         """
-        Resample predictions from model's native stride intervals to desired sampling rate.
+        Resample predictions from model's native stride intervals to desired
+        sampling rate.
 
         predictions: (n_samples, T_out, D) at output_stride intervals
-        sampling_rate: new step in seconds. We resample onto [output_stride, output_stride+sampling_rate, ..., output_horizon].
+        sampling_rate: new step in seconds. We resample onto [output_stride,
+        output_stride+sampling_rate, ..., output_horizon].
         """
         assert predictions.dim() == 3, "predictions must be (S, T, D)"
 
-        S, T, D = predictions.shape
+        S, _T, D = predictions.shape
 
         # Original prediction times based on output_stride and output_horizon
         original_times = np.arange(
@@ -427,7 +431,7 @@ class BNPredict(PredictorBase):
         # Sort by timestamp
         df = df.sort_values("timestamp").reset_index(drop=True)
 
-        # Assume input is already properly sorted and resampled to exactly input_len samples at 1Hz
+        # Assume input is already sorted and resampled  at 1Hz
         if len(df) != self.input_len:
             raise ValueError(
                 f"Expected exactly {self.input_len} samples, got {len(df)}"
@@ -491,7 +495,8 @@ class BNPredict(PredictorBase):
 
         Returns:
             Flight object containing the predicted trajectory if n_samples=1,
-            or Traffic object containing multiple predicted trajectories if n_samples>1
+            or Traffic object containing multiple predicted trajectories if
+            n_samples>1
         """
         # Preprocess flight data
         X_raw, last_timestamp = self.preprocess_flight(flight)
@@ -539,7 +544,7 @@ class BNPredict(PredictorBase):
             self.ctx_std,
         )
 
-        # Resample predictions from 5s intervals to 1s intervals for smoother output
+        # Resample preds from 5s to 1s intervals for smoother output
         futures_global = self._resample_predictions(
             futures_global, T_out, sampling_rate=1
         )
@@ -561,8 +566,7 @@ class BNPredict(PredictorBase):
             )
             alt_ft = futures_np[i, :, 2] / 0.3048
 
-            # Create timestamps for predictions (1s intervals from last_timestamp + output_stride)
-            # Predictions start at output_stride seconds (model's native prediction interval)
+            # Predictions start at output_stride seconds
             pred_timestamps = [
                 last_timestamp + timedelta(seconds=self.output_stride + j)
                 for j in range(
