@@ -41,6 +41,37 @@ def test_aligned_runway() -> None:
     assert belevingsvlucht.aligned_on_runway("EHAM").sum() == 2
 
 
+def test_aligned_runway_labels() -> None:
+    segments = list(belevingsvlucht.aligned_on_runway("EHAM"))
+    assert len(segments) > 0
+    for segment in segments:
+        # Each aligned segment should be tagged with a single runway name
+        assert "rwy" in segment.data.columns
+        assert segment.data.rwy.nunique() == 1
+        assert segment.rwy_max is not None
+
+
+def test_aligned_runway_min_duration_filter() -> None:
+    # A large minimum duration should filter out all aligned segments
+    assert (
+        belevingsvlucht.aligned_on_runway("EHAM", min_duration="30 min").next()
+        is None
+    )
+
+
+def test_aligned_runway_no_overlap() -> None:
+    segments = sorted(
+        belevingsvlucht.aligned_on_runway("EHAM", overlap_tolerance="0s"),
+        key=lambda segment: segment.start,
+    )
+    assert len(segments) > 0
+
+    last_stop = segments[0].stop
+    for segment in segments[1:]:
+        assert segment.start > last_stop
+        last_stop = segment.stop
+
+
 @pytest.mark.skipif(skip_runways, reason="no runways")
 def test_landing_ils() -> None:
     aligned: Optional["Flight"] = belevingsvlucht.aligned_on_ils("EHAM").next()

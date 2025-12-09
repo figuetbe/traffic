@@ -7,6 +7,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Dict,
+    Iterator,
     List,
     NamedTuple,
     Optional,
@@ -90,6 +91,20 @@ class RunwayAirport(HBoxMixin, ShapelyMixin, DataFrameMixin):
     @property
     def shape(self) -> base.BaseGeometry:
         return linemerge(shape(x["geometry"]) for x in self.geojson())
+
+    def iter_geometries(
+        self, buffer: float = 0.0
+    ) -> Iterator[Tuple[str, base.BaseGeometry]]:
+        """
+        Yield runway geometries along with their identifier.
+
+        The optional buffer expands each geometry.
+        """
+        for runway in self.geojson():
+            geom = shape(runway["geometry"])
+            if buffer:
+                geom = geom.buffer(buffer)
+            yield runway["properties"], geom
 
     def plot(
         self,
