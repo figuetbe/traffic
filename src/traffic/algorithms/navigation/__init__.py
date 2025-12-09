@@ -14,6 +14,7 @@ from typing import (
     List,
     Optional,
     Sequence,
+    Tuple,
     Union,
     cast,
 )
@@ -24,7 +25,10 @@ from typing_extensions import NotRequired, TypedDict
 
 import numpy as np
 import pandas as pd
+import pyproj
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, base
+from shapely.ops import transform
+from shapely.prepared import prep
 
 from ...core.iterator import flight_iterator
 from ...core.time import deltalike, to_timedelta
@@ -207,7 +211,12 @@ class NavigationFeatures:
 
     @flight_iterator
     def aligned_on_runway(
-        self, airport: Union[str, "Airport"]
+        self,
+        airport: Union[str, "Airport"],
+        width: float = 60.0,
+        min_points: int = 3,
+        min_duration: deltalike = "8s",
+        overlap_tolerance: deltalike = "1s",
     ) -> Iterator["Flight"]:
         """Iterates on all segments of trajectory matching a runway of the
         given airport.
@@ -224,44 +233,148 @@ class NavigationFeatures:
         self = cast("Flight", self)
 
         _airport = airports[airport] if isinstance(airport, str) else airport
-        if (
-            _airport is None
-            or _airport.runways is None
-            or _airport.runways.shape.is_empty
-        ):
+        if _airport is None or _airport.runways is None:
             return None
 
-        if isinstance(_airport.runways.shape, LineString):
-            candidate_shapes = [
-                LineString(list(self.xy_time)).intersection(
-                    _airport.runways.shape.buffer(5e-4)
+        runway_geometries: List[Tuple[str, base.BaseGeometry]] = []
+
+        def buffer_in_meters(
+            geom: base.BaseGeometry, meters: float
+        ) -> base.BaseGeometry:
+            if meters <= 0:
+                return geom
+            centroid = geom.centroid
+            proj_local = pyproj.Proj(
+                proj="aeqd", lat_0=centroid.y, lon_0=centroid.x
+            )
+            to_local = pyproj.Transformer.from_proj(
+                pyproj.Proj("epsg:4326"), proj_local, always_xy=True
+            )
+            to_wgs84 = pyproj.Transformer.from_proj(
+                proj_local, pyproj.Proj("epsg:4326"), always_xy=True
+            )
+            projected = transform(
+                to_local.transform,
+                geom,
+            )
+            buffered = projected.buffer(meters / 2)
+            return transform(
+                to_wgs84.transform,
+                buffered,
+            )
+
+        # Prefer OSM runway polygons when available
+        try:
+            osm = _airport._openstreetmap()
+            if "aeroway" in osm.data.columns:
+                for _, row in osm.query("aeroway == 'runway'").data.iterrows():
+                    geom = row.geometry
+                    if geom is None or geom.is_empty:
+                        continue
+                    if not geom.is_valid:
+                        geom = geom.buffer(0)
+                    if isinstance(geom, (LineString, MultiLineString)):
+                        geom = buffer_in_meters(geom, width)
+                    name = row.get("ref") or row.get("name") or "runway"
+                    runway_geometries.append((str(name), geom))
+        except Exception:
+            pass
+
+        # Fallback to buffered centerlines from the runway database
+        if not runway_geometries and _airport.runways is not None:
+            runway_geometries = list(_airport.runways.iter_geometries(buffer=0))
+            runway_geometries = [
+                (
+                    name,
+                    buffer_in_meters(geom, width)
+                    if isinstance(geom, (LineString, MultiLineString))
+                    else geom,
                 )
-            ]
-        else:
-            candidate_shapes = [
-                LineString(list(self.xy_time)).intersection(
-                    on_runway.buffer(5e-4)
-                )
-                for on_runway in _airport.runways.shape.geoms
+                for name, geom in runway_geometries
             ]
 
-        for intersection in candidate_shapes:
-            if intersection.is_empty:
+        if len(runway_geometries) == 0:
+            return None
+
+        data = (
+            self.data.query("longitude.notnull() and latitude.notnull()")
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+        if data.shape[0] == 0:
+            return None
+        coords = data[["longitude", "latitude"]].to_numpy()
+        timestamps = data["timestamp"]
+
+        def contiguous_runs(mask: np.ndarray) -> List[Tuple[int, int]]:
+            indices = np.flatnonzero(mask)
+            if indices.size == 0:
+                return []
+            runs: List[Tuple[int, int]] = []
+            start, prev = indices[0], indices[0]
+            for current in indices[1:]:
+                if current == prev + 1:
+                    prev = current
+                    continue
+                runs.append((start, prev))
+                start = prev = current
+            runs.append((start, prev))
+            return runs
+
+        found_segments: List[Tuple[pd.Timestamp, pd.Timestamp, str]] = []
+
+        for rwy_name, geom in runway_geometries:
+            if geom.is_empty:
                 continue
-            if isinstance(intersection, LineString):
-                (*_, start), *_, (*_, stop) = intersection.coords
-                segment = self.between(start, stop, strict=False)
-                if segment is not None:
-                    yield segment
-            if isinstance(intersection, MultiLineString):
-                (*_, start), *_, (*_, stop) = intersection.geoms[0].coords
-                for chunk in intersection.geoms:
-                    (*_, start_bak), *_, (*_, stop) = chunk.coords
-                    if stop - start > 40:  # crossing runways and back
-                        start = start_bak
-                segment = self.between(start, stop, strict=False)
-                if segment is not None:
-                    yield segment
+
+            prepared = prep(geom)
+            mask = np.fromiter(
+                (prepared.intersects(Point(lon, lat)) for lon, lat in coords),
+                dtype=bool,
+                count=len(coords),
+            )
+
+            for start_idx, stop_idx in contiguous_runs(mask):
+                if stop_idx - start_idx + 1 < 3:
+                    continue
+                start_ts = timestamps.iloc[start_idx]
+                stop_ts = timestamps.iloc[stop_idx]
+                found_segments.append((start_ts, stop_ts, rwy_name))
+
+        if len(found_segments) == 0:
+            return None
+
+        tolerance = to_timedelta(overlap_tolerance)
+        min_duration_td = to_timedelta(min_duration)
+
+        per_rwy: Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]] = {}
+        for start_ts, stop_ts, rwy_name in found_segments:
+            if stop_ts - start_ts < min_duration_td:
+                continue
+            per_rwy.setdefault(rwy_name, []).append((start_ts, stop_ts))
+
+        for rwy_name, runs in per_rwy.items():
+            cleaned: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+            for start_ts, stop_ts in sorted(runs, key=lambda elt: elt[0]):
+                if not cleaned:
+                    cleaned.append((start_ts, stop_ts))
+                    continue
+
+                prev_start, prev_stop = cleaned[-1]
+                if start_ts <= prev_stop + tolerance:
+                    prev_dur = prev_stop - prev_start
+                    cur_dur = stop_ts - start_ts
+                    if cur_dur > prev_dur:
+                        cleaned[-1] = (start_ts, stop_ts)
+                    continue
+
+                cleaned.append((start_ts, stop_ts))
+
+            for start_ts, stop_ts in cleaned:
+                segment = self.between(start_ts, stop_ts, strict=False)
+                if segment is None:
+                    continue
+                yield segment.__class__(segment.data.assign(rwy=rwy_name))
 
     # >>>>> This function is to be deprecated
 
