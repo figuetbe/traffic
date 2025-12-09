@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import warnings
 from operator import attrgetter
 from pathlib import Path
@@ -26,8 +27,16 @@ from typing_extensions import NotRequired, TypedDict
 import numpy as np
 import pandas as pd
 import pyproj
-from shapely.geometry import LineString, MultiLineString, Point, Polygon, base
-from shapely.ops import transform
+from shapely.affinity import rotate, translate
+from shapely.geometry import (
+    LineString,
+    MultiLineString,
+    Point,
+    Polygon,
+    base,
+    box,
+)
+from shapely.ops import linemerge, transform
 from shapely.prepared import prep
 
 from ...core.iterator import flight_iterator
@@ -212,7 +221,7 @@ class NavigationFeatures:
     def aligned_on_runway(
         self,
         airport: Union[str, "Airport"],
-        width: float = 60.0,
+        rwy_width: float = 60.0,
         min_points: int = 3,
         min_duration: deltalike = "8s",
         overlap_tolerance: deltalike = "1s",
@@ -220,10 +229,39 @@ class NavigationFeatures:
         """Iterates on all segments of trajectory matching a runway of the
         given airport.
 
+        Methodology: build a flat-ended rectangle from each runway centerline
+        (airport database) with full width and unchanged length, test each
+        trajectory point for intersection, keep contiguous runs of at least
+        `min_points`,
+        then filter runs shorter than `min_duration`. Overlapping runs per
+        runway are merged within `overlap_tolerance`.
+
         Example usage:
 
         >>> sum(1 for _ in belevingsvlucht.aligned_on_runway("EHAM"))
         2
+
+        Parameters
+        ----------
+        airport:
+            ICAO/IATA code or `Airport` instance to match.
+        rwy_width:
+            Full runway width in meters used to build rectangular footprints
+            around centerlines or linestring geometries.
+        min_points:
+            Minimum consecutive trajectory points required inside a buffered
+            runway before considering a segment.
+        min_duration:
+            Minimum elapsed time of a segment to keep; applied after the
+            point-count filter.
+        overlap_tolerance:
+            Maximum gap allowed when merging overlapping or adjacent segments
+            per runway.
+
+        Notes
+        -----
+        Both `min_points` and `min_duration` must be satisfied for a segment to
+        be yielded.
         """
 
         from ...data import airports
@@ -237,11 +275,15 @@ class NavigationFeatures:
 
         runway_geometries: List[Tuple[str, base.BaseGeometry]] = []
 
-        def buffer_in_meters(
-            geom: base.BaseGeometry, meters: float
+        def runway_shape(
+            geom: base.BaseGeometry, width_m: float
         ) -> base.BaseGeometry:
-            if meters <= 0:
+            """Return a polygon for the runway without extending its length."""
+            if width_m <= 0:
                 return geom
+            if isinstance(geom, Polygon):
+                return geom  # already a surface; keep as-is
+
             centroid = geom.centroid
             proj_local = pyproj.Proj(
                 proj="aeqd", lat_0=centroid.y, lon_0=centroid.x
@@ -252,40 +294,47 @@ class NavigationFeatures:
             to_wgs84 = pyproj.Transformer.from_proj(
                 proj_local, pyproj.Proj("epsg:4326"), always_xy=True
             )
-            projected = transform(
-                to_local.transform,
-                geom,
-            )
-            buffered = projected.buffer(meters / 2)
-            return transform(
-                to_wgs84.transform,
-                buffered,
-            )
+            projected = transform(to_local.transform, geom)
 
-        # Prefer OSM runway polygons when available
-        try:
-            osm = _airport._openstreetmap()
-            if "aeroway" in osm.data.columns:
-                for _, row in osm.query("aeroway == 'runway'").data.iterrows():
-                    geom = row.geometry
-                    if geom is None or geom.is_empty:
-                        continue
-                    if not geom.is_valid:
-                        geom = geom.buffer(0)
-                    if isinstance(geom, (LineString, MultiLineString)):
-                        geom = buffer_in_meters(geom, width)
-                    name = row.get("ref") or row.get("name") or "runway"
-                    runway_geometries.append((str(name), geom))
-        except Exception:
-            pass
+            if isinstance(projected, (LineString, MultiLineString)):
+                line: base.BaseGeometry = projected
+                if isinstance(projected, MultiLineString):
+                    merged = linemerge(projected)
+                    if isinstance(merged, MultiLineString):
+                        line = max(merged.geoms, key=lambda g: g.length)
+                    else:
+                        line = merged
 
-        # Fallback to buffered centerlines from the runway database
-        if not runway_geometries and _airport.runways is not None:
+                if not isinstance(line, LineString) or line.length == 0:
+                    return transform(to_wgs84.transform, projected)
+
+                coords = list(line.coords)
+                x0, y0 = coords[0]
+                x1, y1 = coords[-1]
+                angle = math.degrees(math.atan2(y1 - y0, x1 - x0))
+                length_m = line.length
+
+                rect_local = box(
+                    -length_m / 2, -width_m / 2, length_m / 2, width_m / 2
+                )
+                rect_rotated = rotate(
+                    rect_local, angle, origin=(0, 0), use_radians=False
+                )
+                center = line.interpolate(0.5, normalized=True)
+                rect_shifted = translate(
+                    rect_rotated, xoff=center.x, yoff=center.y
+                )
+                return transform(to_wgs84.transform, rect_shifted)
+
+            return transform(to_wgs84.transform, projected)
+
+        # Use buffered centerlines from the runway database
+        if _airport.runways is not None:
             runway_geometries = list(_airport.runways.iter_geometries(buffer=0))
             runway_geometries = [
                 (
                     name,
-                    buffer_in_meters(geom, width)
+                    runway_shape(geom, rwy_width)
                     if isinstance(geom, (LineString, MultiLineString))
                     else geom,
                 )
@@ -334,7 +383,7 @@ class NavigationFeatures:
             )
 
             for start_idx, stop_idx in contiguous_runs(mask):
-                if stop_idx - start_idx + 1 < 3:
+                if stop_idx - start_idx + 1 < min_points:
                     continue
                 start_ts = timestamps.iloc[start_idx]
                 stop_ts = timestamps.iloc[stop_idx]
@@ -351,6 +400,8 @@ class NavigationFeatures:
             if stop_ts - start_ts < min_duration_td:
                 continue
             per_rwy.setdefault(rwy_name, []).append((start_ts, stop_ts))
+
+        ordered_segments: List[Tuple[pd.Timestamp, pd.Timestamp, str]] = []
 
         for rwy_name, runs in per_rwy.items():
             cleaned: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
@@ -370,10 +421,15 @@ class NavigationFeatures:
                 cleaned.append((start_ts, stop_ts))
 
             for start_ts, stop_ts in cleaned:
-                segment = self.between(start_ts, stop_ts, strict=False)
-                if segment is None:
-                    continue
-                yield segment.__class__(segment.data.assign(rwy=rwy_name))
+                ordered_segments.append((start_ts, stop_ts, rwy_name))
+
+        for start_ts, stop_ts, rwy_name in sorted(
+            ordered_segments, key=lambda elt: elt[0]
+        ):
+            segment = self.between(start_ts, stop_ts, strict=False)
+            if segment is None:
+                continue
+            yield segment.__class__(segment.data.assign(rwy=rwy_name))
 
     # >>>>> This function is to be deprecated
 
